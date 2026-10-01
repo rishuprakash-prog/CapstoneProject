@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src import ai as ai_mod
+from src import automation, crt
 from src.analysis import (COMPLETENESS, COMPLETENESS_THRESHOLD, build_ai_context, below_average,
                           district_scores, district_table, district_trend, key_findings,
                           missing_streaks, prepare, sharpest_decline, state_trend, state_values)
@@ -45,6 +46,14 @@ st.markdown("""
 .flow span.step {background: rgba(31,78,121,.08); border:1px solid rgba(31,78,121,.25);
   border-radius: 999px; padding:.25rem .7rem; font-size:.85rem;}
 .flow span.arrow {opacity:.5;}
+.kpi-grid {display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:.75rem; margin:.4rem 0 1rem;}
+.kpi {border:1px solid rgba(31,78,121,.18); border-radius:12px; padding:.75rem .9rem; background:#fff;
+  border-left:5px solid var(--accent, #1F4E79); box-shadow:0 1px 3px rgba(0,0,0,.04);}
+.kpi .kpi-head {display:flex; align-items:center; gap:.45rem; color:#5b6b7f; font-size:.82rem; line-height:1.2;}
+.kpi .kpi-icon {font-size:1.35rem;}
+.kpi .kpi-value {font-size:1.65rem; font-weight:700; color:#1B2733; margin-top:.25rem; white-space:nowrap;
+  font-variant-numeric: tabular-nums;}
+.kpi .kpi-sub {font-size:.75rem; color:#7a8899; margin-top:.1rem;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -93,21 +102,40 @@ def fmt(value: float, metric: str) -> str:
     return f"{value:.1f}%" if "%" in metric else f"{value:.2f}"
 
 
+def set_context(context: str) -> None:
+    ss.context = context
+    ss.context_hash = hashlib.sha1(context.encode()).hexdigest()[:12]
+
+
 def load_dataset(df: pd.DataFrame, name: str, schema: Schema | None = None) -> None:
+    ss.chat, ss.outputs = [], {}
+    if schema is None and crt.is_crt(df):
+        # Classroom Transaction export: dedicated session-level report instead of generic analysis
+        data = crt.prepare_sessions(df)
+        ss.mode, ss.crt, ss.df_raw, ss.file_name = "crt", data, df, name
+        for k in ("prep", "schema", "crt_fy", "crt_district", "crt_class"):
+            ss.pop(k, None)
+        s = crt.filter_sessions(data, data.fin_years[-1:])
+        ss.table = crt.district_report(s)
+        set_context(crt.build_context(data, s, f"FY {', '.join(data.fin_years[-1:])}"))
+        ss.dataset_id = store.save_dataset(ss.session_id, name, len(df), s["district"].nunique(),
+                                           ", ".join(data.fin_years))
+        return
+    ss.mode = "generic"
+    ss.pop("crt", None)
     schema = schema or detect_schema(df)
     ss.df_raw, ss.schema, ss.file_name = df, schema, name
     problems = [p for p in schema.problems() if "district" in p or "indicator" in p]
     if problems:
         ss.pop("prep", None)
+        ss.pop("context", None)
         return
     prep = prepare(df, schema)
     ss.prep = prep
     ss.table = district_table(prep)
     ss.state = state_values(prep)
     ss.findings = key_findings(prep)
-    ss.context = build_ai_context(prep)
-    ss.context_hash = hashlib.sha1(ss.context.encode()).hexdigest()[:12]
-    ss.chat, ss.outputs = [], {}
+    set_context(build_ai_context(prep))
     ss.dataset_id = store.save_dataset(ss.session_id, name, len(df), ss.table.shape[0], ", ".join(prep.periods))
 
 
@@ -134,13 +162,38 @@ def run_ai(kind: str, fn, *args, force: bool = False) -> str | None:
 
 
 def need_data() -> bool:
-    if "prep" not in ss:
+    if "prep" not in ss and "crt" not in ss:
         st.info("⬅️ First upload a dataset (or load the sample) on the **Upload Data** page.")
         if st.button("Load sample SHWP dataset", type="primary"):
             load_dataset(pd.read_csv(SAMPLE_FILE), SAMPLE_FILE.name)
             st.rerun()
         return True
     return False
+
+
+def make_panel(kind: str, subject: str, body_md: str, docx: bytes | None = None,
+               docx_filename: str | None = None) -> None:
+    """'Email via Make.com' panel: sends the output to the Make webhook (Gmail/Drive in Make)."""
+    url = secret("MAKE_WEBHOOK_URL")
+    with st.expander("📧 Email via Make.com automation", expanded=False):
+        if not url:
+            st.caption("Make.com is not configured. Add MAKE_WEBHOOK_URL to secrets to enable email delivery.")
+            return
+        to = st.text_input("Recipient email", secret("MAKE_DEFAULT_RECIPIENT"), key=f"mk_to_{kind}")
+        st.caption("Make.com scenario: Webhook → Gmail (with Word attachment) → Google Drive.")
+        if st.button("📧 Send now", key=f"mk_send_{kind}", type="primary"):
+            if not automation.valid_email(to):
+                st.error("Please enter a valid email address.")
+                return
+            payload = automation.build_payload(
+                kind, to, subject, body_md, ss.file_name, getattr(ss.get("_ai"), "last_model", None),
+                docx, docx_filename, {"language": ss.get("language", "English")})
+            with st.spinner("Sending to Make.com…"):
+                ok, msg = automation.send_to_make(url, payload)
+            (st.success if ok else st.error)(msg)
+            if ok:
+                store.save_insight(ss.session_id, ss.get("dataset_id"), "sent_via_make",
+                                   f"{kind} → {to}: {subject}")
 
 
 def source_caption() -> None:
@@ -160,10 +213,12 @@ with st.sidebar:
              format_func=lambda x: "हिंदी" if x == "Hindi" else x)
 
     st.markdown("**Status**")
-    st.markdown(f"{'🟢' if 'prep' in ss else '⚪'} Dataset: {ss.get('file_name', 'not loaded')}")
+    st.markdown(f"{'🟢' if 'context' in ss else '⚪'} Dataset: {ss.get('file_name', 'not loaded')}")
     has_key = bool(ss.get("user_gemini_key") or secret("GEMINI_API_KEY"))
     st.markdown(f"{'🟢' if has_key else '🔴'} Gemini AI {'connected' if has_key else 'key missing'}")
     st.markdown(f"{'🟢' if store.enabled else '⚪'} Supabase {'saving history' if store.enabled else 'off (session only)'}")
+    has_make = bool(secret("MAKE_WEBHOOK_URL"))
+    st.markdown(f"{'🟢' if has_make else '⚪'} Make.com {'automation on' if has_make else 'not configured'}")
     if not secret("GEMINI_API_KEY"):
         with st.expander("🔑 Use your own free Gemini key"):
             st.text_input("Gemini API key", type="password", key="user_gemini_key",
@@ -211,8 +266,25 @@ def page_upload() -> None:
 
     if "df_raw" not in ss:
         return
-    df, schema = ss.df_raw, ss.schema
+    df = ss.df_raw
     st.success(f"Loaded **{ss.file_name}** — {len(df):,} rows × {df.shape[1]} columns.")
+
+    if ss.get("mode") == "crt":
+        data = ss.crt
+        st.info("📋 Detected a **Classroom Transaction (CRT) report**. Rows are de-duplicated into sessions "
+                "(class-section × date × theme) so boys/girls are not double-counted across activities.")
+        kpi_cards([
+            ("📍", "Districts", indian(data.sessions["district"].nunique()), "in file", "#1F4E79"),
+            ("🏫", "Schools", indian(data.sessions["school"].nunique()), "unique UDISE", "#2E8B57"),
+            ("📚", "Sessions", indian(len(data.sessions)), f"from {indian(data.raw_rows)} activity rows", "#7B5EA7"),
+            ("🎯", "Themes", indian(data.sessions["theme"].nunique()), "modules", "#E08E0B"),
+            ("📅", "Financial years", " · ".join(data.fin_years), "", "#3A7CA5"),
+        ])
+        st.dataframe(df.head(50), width="stretch", height=260)
+        st.button("Open CRT Report ➜", type="primary", on_click=lambda: ss.update(page=PAGES[1]))
+        return
+
+    schema = ss.schema
 
     with st.expander("🎛 Column mapping (auto-detected — adjust if needed)", expanded="prep" not in ss):
         cols = [None] + list(df.columns)
@@ -244,8 +316,208 @@ def page_upload() -> None:
         st.button("Continue to Dashboard ➜", type="primary", on_click=lambda: ss.update(page=PAGES[1]))
 
 
+GENDER_COLORS = {"Boys": "#2F6DB5", "Girls": "#D6457A"}
+
+
+def indian(n: float) -> str:
+    """Format a number with Indian digit grouping: 245063 -> 2,45,063."""
+    s = str(int(round(n)))
+    neg, s = s.startswith("-"), s.lstrip("-")
+    if len(s) > 3:
+        head, tail = s[:-3], s[-3:]
+        groups = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        s = ",".join(([head] if head else []) + groups) + "," + tail
+    return ("-" if neg else "") + s
+
+
+def kpi_cards(cards: list[tuple[str, str, str, str, str]]) -> None:
+    """cards: (icon, label, value, sub-text, accent colour) rendered as a responsive grid."""
+    html = "".join(
+        f'<div class="kpi" style="--accent:{accent}"><div class="kpi-head"><span class="kpi-icon">{icon}</span>'
+        f'<span>{label}</span></div><div class="kpi-value">{value}</div><div class="kpi-sub">{sub}</div></div>'
+        for icon, label, value, sub, accent in cards)
+    st.markdown(f'<div class="kpi-grid">{html}</div>', unsafe_allow_html=True)
+
+
+def _bar_height(n: int) -> int:
+    return max(320, 26 * n + 80)
+
+
+def page_crt_report() -> None:
+    data: crt.CRTData = ss.crt
+    st.title("📋 Classroom Transaction Report")
+    st.caption(f"Source: **{ss.file_name}** · weekly school health & wellness sessions · "
+               "unit = session (class-section × date × theme)")
+
+    sessions = data.sessions
+    f1, f2, f3, f4 = st.columns([1.8, 2, 1.5, 1.3])
+    fys = f1.multiselect("Financial year", data.fin_years, default=data.fin_years[-1:], key="crt_fy")
+    districts = f2.multiselect("District", sorted(sessions["district"].unique()), key="crt_district",
+                               placeholder="All districts")
+    classes = f3.multiselect("Class", sorted(sessions["class"].unique(), key=lambda c: (len(str(c)), str(c))),
+                             key="crt_class", placeholder="All classes")
+    f4.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+    drop_out = f4.toggle("Exclude outliers", key="crt_outliers",
+                         help=f"Hide sessions with 0 participants or more than {crt.OUTLIER_LIMIT} "
+                              "(likely data-entry errors).")
+    s = crt.filter_sessions(data, fys, districts, classes, drop_out)
+    if s.empty:
+        st.warning("No sessions match these filters.")
+        return
+
+    filters = (f"FY {', '.join(fys) or 'all'}; districts: {', '.join(districts) or 'all'}; "
+               f"classes: {', '.join(classes) or 'all'}; outliers {'excluded' if drop_out else 'included'}")
+    dist = crt.district_report(s)
+    themes = crt.theme_report(s)
+    weekly = crt.weekly_report(s)
+    fy_tab = crt.fy_summary(s)
+    ss.table = dist
+    set_context(crt.build_context(data, s, filters))  # AI pages answer on exactly this filtered view
+
+    # KPI strip
+    boys, girls = int(s["boys"].sum()), int(s["girls"].sum())
+    n_schools, n_sessions = s["school"].nunique(), len(s)
+    girls_pct = 100 * girls / max(boys + girls, 1)
+    kpi_cards([
+        ("📍", "Districts", indian(s["district"].nunique()), "reporting", "#1F4E79"),
+        ("🗺️", "Blocks", indian(s["block"].nunique()), "reporting", "#3A7CA5"),
+        ("🏫", "Schools reported", indian(n_schools), f"{n_sessions / max(n_schools, 1):.1f} sessions / school", "#2E8B57"),
+        ("📚", "Sessions held", indian(n_sessions), f"{s['week'].nunique()} weeks", "#7B5EA7"),
+        ("👦", "Boys participated", indian(boys), f"avg {s['boys'].mean():.1f} / session", GENDER_COLORS["Boys"]),
+        ("👧", "Girls participated", indian(girls), f"avg {s['girls'].mean():.1f} / session", GENDER_COLORS["Girls"]),
+        ("⚖️", "Girls share", f"{girls_pct:.1f}%", f"boys {100 - girls_pct:.1f}%", "#E08E0B"),
+    ])
+
+    sheets = {"FY Summary": fy_tab, "District Report": dist, "Theme Report": themes, "Weekly Report": weekly,
+              "District x Theme": crt.district_theme_matrix(s),
+              "Week x Theme": crt.weekly_theme(s).pivot_table(index="Week", columns="Theme",
+                                                              values=["Boys", "Girls"], aggfunc="sum", fill_value=0),
+              "Data Quality": crt.data_quality(data, s).set_index("Check")}
+    st.download_button("📥 Download full report (Excel with charts)",
+                       crt.excel_report(sheets, "Classroom Transaction Report"),
+                       f"CRT_Report_{'_'.join(fys) or 'all'}.xlsx", type="primary")
+
+    t1, t2, t3, t4, t5, t6 = st.tabs(["🏫 District Report", "🎯 Theme-wise", "📅 Weekly Sessions",
+                                      "🗺 District × Theme", "📆 Financial Year", "✅ Data Quality"])
+    plot_dist = dist.drop(index="STATE TOTAL", errors="ignore").reset_index()
+
+    with t1:
+        st.markdown("#### Schools reported and boys/girls participation per district")
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            d = plot_dist.sort_values("Schools Reported")
+            fig = px.bar(d, x="Schools Reported", y="District", orientation="h", text="Schools Reported",
+                         color_discrete_sequence=["#1F4E79"], title="Number of schools reported")
+            fig.update_layout(height=_bar_height(len(d)), margin=dict(l=0, r=10, t=40, b=0))
+            st.plotly_chart(fig, width="stretch")
+        with c2:
+            d = plot_dist.sort_values("Schools Reported").melt(
+                id_vars="District", value_vars=["Avg Boys / Session", "Avg Girls / Session"],
+                var_name="Gender", value_name="Average per session")
+            d["Gender"] = d["Gender"].str.split().str[1]
+            fig = px.bar(d, x="Average per session", y="District", color="Gender", orientation="h",
+                         barmode="group", color_discrete_map=GENDER_COLORS, text="Average per session",
+                         title="Average boys & girls per session")
+            fig.update_layout(height=_bar_height(len(plot_dist)), margin=dict(l=0, r=10, t=40, b=0),
+                              legend=dict(orientation="h", y=1.02, x=0.6))
+            st.plotly_chart(fig, width="stretch")
+        st.dataframe(dist, width="stretch", height=min(40 + 35 * len(dist), 700),
+                     column_config={"Girls %": st.column_config.NumberColumn(format="%.1f%%")})
+        st.caption("Avg / Session = mean boys (or girls) present per session. Boys/Girls totals count "
+                   "session attendances, not unique students.")
+
+    with t2:
+        st.markdown("#### Theme-wise boys and girls participation in weekly sessions")
+        c1, c2 = st.columns([2, 1], gap="large")
+        with c1:
+            d = themes.reset_index().melt(id_vars="Theme (Module)", value_vars=["Boys", "Girls"],
+                                          var_name="Gender", value_name="Participants")
+            fig = px.bar(d, x="Participants", y="Theme (Module)", color="Gender", orientation="h",
+                         barmode="group", color_discrete_map=GENDER_COLORS, text="Participants",
+                         title="Participants by theme")
+            fig.update_layout(height=_bar_height(2 * len(themes)), margin=dict(l=0, r=10, t=40, b=0),
+                              yaxis=dict(categoryorder="total ascending"), legend=dict(orientation="h", y=1.02, x=0.6))
+            st.plotly_chart(fig, width="stretch")
+        with c2:
+            fig = px.pie(names=["Boys", "Girls"], values=[boys, girls], hole=0.55, title="Overall gender split",
+                         color=["Boys", "Girls"], color_discrete_map=GENDER_COLORS)
+            fig.update_layout(height=320, margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig, width="stretch")
+            fig = px.bar(themes.reset_index().sort_values("Sessions"), x="Sessions", y="Theme (Module)",
+                         orientation="h", title="Sessions per theme", color_discrete_sequence=["#1F4E79"])
+            fig.update_layout(height=380, margin=dict(l=0, r=0, t=40, b=0), yaxis_title=None)
+            st.plotly_chart(fig, width="stretch")
+        st.dataframe(themes, width="stretch",
+                     column_config={"Girls %": st.column_config.NumberColumn(format="%.1f%%")})
+
+    with t3:
+        st.markdown("#### Weekly session participation")
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            d = weekly.melt(id_vars=["Financial Year", "Week"], value_vars=["Boys", "Girls"],
+                            var_name="Gender", value_name="Participants")
+            d["Week label"] = d["Financial Year"].str[2:4] + "-" + d["Financial Year"].str[-2:] + " W" + d["Week"].astype(str)
+            fig = px.line(d, x="Week label", y="Participants", color="Gender", markers=True,
+                          color_discrete_map=GENDER_COLORS, title="Boys & girls participated per week")
+            fig.update_layout(height=380, margin=dict(l=0, r=10, t=40, b=0), xaxis_title=None)
+            st.plotly_chart(fig, width="stretch")
+        with c2:
+            gender = st.radio("Show", ["Girls", "Boys"], horizontal=True, key="wk_gender")
+            wt = crt.weekly_theme(s)
+            fig = px.bar(wt, x="Week", y=gender, color="Theme", title=f"Theme-wise {gender.lower()} per week")
+            fig.update_layout(height=380, margin=dict(l=0, r=10, t=40, b=0), legend=dict(font=dict(size=9)),
+                              barmode="stack")
+            st.plotly_chart(fig, width="stretch")
+        st.dataframe(weekly, width="stretch", hide_index=True,
+                     column_config={"Girls %": st.column_config.NumberColumn(format="%.1f%%")})
+        with st.expander("Week × theme table (boys / girls)"):
+            st.dataframe(sheets["Week x Theme"], width="stretch")
+
+    with t4:
+        metric = st.radio("Value", ["Sessions", "Participants (boys + girls)"], horizontal=True, key="dt_val")
+        m = crt.district_theme_matrix(s, "sessions" if metric == "Sessions" else "participants")
+        fig = px.imshow(m, text_auto=True, aspect="auto", color_continuous_scale="Blues",
+                        title=f"{metric} by district and theme")
+        fig.update_layout(height=max(380, 26 * len(m) + 160), margin=dict(l=0, r=0, t=40, b=0),
+                          xaxis=dict(tickangle=-35))
+        st.plotly_chart(fig, width="stretch")
+        st.dataframe(m, width="stretch")
+
+    with t5:
+        c1, c2 = st.columns([1, 1], gap="large")
+        with c1:
+            d = fy_tab.reset_index().melt(id_vars="Financial Year", value_vars=["Boys", "Girls"],
+                                          var_name="Gender", value_name="Participants")
+            fig = px.bar(d, x="Financial Year", y="Participants", color="Gender", barmode="group",
+                         color_discrete_map=GENDER_COLORS, text="Participants", title="Participation by financial year")
+            fig.update_layout(height=360, margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig, width="stretch")
+        with c2:
+            st.dataframe(fy_tab.T, width="stretch")
+        st.caption("Tip: select several financial years in the filter above to compare them.")
+
+    with t6:
+        st.dataframe(crt.data_quality(data, s), width="stretch", hide_index=True)
+        st.caption("Each CRT row is an activity; a session repeats once per activity with identical counts. "
+                   "InsightAI keeps one row per session (highest reported count) before computing totals.")
+
+    st.divider()
+    if st.button("✨ Generate AI summary of this report", type="primary"):
+        ss.outputs["insights"] = run_ai("auto_insights", ai_mod.auto_insights)
+    if ss.outputs.get("insights"):
+        with st.container(border=True):
+            st.markdown(ss.outputs["insights"])
+        make_panel("ai_summary", f"InsightAI — CRT Report AI Summary ({filters})", ss.outputs["insights"])
+
+
 def page_dashboard() -> None:
     if need_data():
+        return
+    if ss.get("mode") == "crt":
+        page_crt_report()
         return
     prep, table = ss.prep, ss.table
     st.title("📊 Programme Dashboard")
@@ -395,6 +667,7 @@ def page_actions() -> None:
         with st.container(border=True):
             st.markdown(ss.outputs["actions"])
         st.download_button("📥 Download (Markdown)", ss.outputs["actions"].encode("utf-8"), "priority_actions.md")
+        make_panel("priority_actions", f"InsightAI — Top 5 Priority Actions ({ss.file_name})", ss.outputs["actions"])
 
 
 def page_brief() -> None:
@@ -417,6 +690,8 @@ def page_brief() -> None:
                            type="primary", width="stretch")
         d2.download_button("📥 Download Markdown", brief.encode("utf-8"), "InsightAI_Review_Brief.md",
                            width="stretch")
+        make_panel("review_brief", f"{programme} — Review Brief ({meeting.strftime('%d %b %Y')})", brief,
+                   docx, "InsightAI_Review_Brief.docx")
         with st.container(border=True):
             st.markdown(brief)
 

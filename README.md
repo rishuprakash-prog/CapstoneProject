@@ -29,6 +29,32 @@ IIT Patna Generative AI Capstone Sprint 2026 · #IITPatnaCapstone
 8. **Interactive dashboard** — KPI cards, district bars, trends and a reporting-completeness heatmap
 9. **History and traceability** — questions and insights saved in Supabase and linked to their dataset; a user can delete everything they stored
 
+## Classroom Transaction (CRT) report
+
+When the uploaded file is a **Classroom Transaction export**, InsightAI switches to a dedicated
+report. It detects this from columns such as `District`, `UDISE`, `BoysP`, `GirlsP`, `Module`,
+`FinYear` and `Weak`.
+
+**De-duplication:** each CRT row is one *activity*. A session repeats once per activity, with the
+same boys/girls counts each time. The report therefore first collapses the data to one row per
+session (UDISE × class × section × date × theme) and computes totals from that, so participants
+are not double-counted.
+
+**Filters:** financial year, district, class, and an option to exclude sessions with zero or
+implausibly high counts.
+
+| Tab | Graphs | Table |
+|---|---|---|
+| District Report | Schools reported per district; average boys vs girls per session | Blocks, schools reported, sessions, boys, girls, averages, girls %, state total |
+| Theme-wise | Boys vs girls by theme; gender split; sessions per theme | Theme-wise schools, sessions, boys, girls, girls % |
+| Weekly Sessions | Weekly boys/girls trend; theme-wise participation per week | Week-wise schools, sessions, boys, girls |
+| District × Theme | Heatmap (sessions or participants) | District × theme matrix |
+| Financial Year | Boys/girls by FY | FY summary |
+| Data Quality | — | Raw rows, duplicates removed, zero and outlier sessions |
+
+The full report downloads as **Excel with native charts**. The AI summary, Q&A and review brief
+always use the currently filtered view.
+
 ## System flow
 
 ```
@@ -97,6 +123,39 @@ copy .streamlit\secrets.toml.example .streamlit\secrets.toml   # then paste your
 2. Open https://share.streamlit.io, sign in with GitHub, click **Create app**, choose the repo, and set the main file to `app.py`.
 3. Under **Advanced settings → Secrets**, paste the contents of your `secrets.toml`. Choose Python 3.12, then click **Deploy**.
 4. You get a live URL like `https://insightai-xyz.streamlit.app`. Share it in your submission.
+
+## Automation with Make.com (free)
+
+The AI summary, Priority Actions and Review Brief pages each have an **📧 Email via Make.com** panel.
+It sends the output as JSON to a Make **Custom Webhook**. Make then emails it through Gmail, attaching
+the Word brief, and can also save it to Google Drive.
+
+**Set up the scenario:**
+1. Sign up at https://www.make.com (free plan) and click **Create a new scenario**.
+2. Add **Webhooks → Custom webhook**, click **Add**, name it `InsightAI`, and copy the webhook address.
+3. Paste the address into `.streamlit/secrets.toml` as `MAKE_WEBHOOK_URL = "..."`, then restart the app.
+4. In Make, click **Redetermine data structure**. In the app, send one email from Review Brief, so Make learns the fields.
+5. Add **Gmail → Send an email** and connect your Google account:
+   - **To:** `{{recipient_email}}`
+   - **Subject:** `{{subject}}`
+   - **Content:** `{{body_html}}`
+   - **Attachments:** File name `{{docx_filename}}`, Data `{{toBinary(docx_base64; "base64")}}`
+   - Set a filter on this route, `has_attachment = true`. Add a second Gmail route without the attachment for `has_attachment = false`.
+6. Optional: add **Google Drive → Upload a file**, using the same file name and data, to keep an archive.
+7. Optional: add **Webhooks → Webhook response**, status `200`.
+8. Turn the scenario **ON** and save it.
+
+**Payload fields:** `kind` (review_brief, priority_actions, ai_summary), `recipient_email`, `subject`,
+`body_markdown`, `body_html`, `has_attachment`, `docx_filename`, `docx_base64`, `source_file`, `model`,
+`generated_at`, `language`.
+
+## API testing with Postman (free)
+
+Import `postman/InsightAI.postman_collection.json` into Postman. Set the collection variables
+`gemini_api_key`, `make_webhook_url` and `test_email`, then run the collection. It has three requests:
+1. **Gemini: List models.** Checks that the configured model is available for your key.
+2. **Gemini: Generate insight.** Sends sample district data and checks that the answer names the right district.
+3. **Make.com: Send test report.** Checks that the webhook accepts the payload with status 200 or 202.
 
 ## Regenerate sample data
 ```powershell

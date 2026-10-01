@@ -9,8 +9,9 @@ import time
 from google import genai
 from google.genai import errors, types
 
-# Tried in order; falls through on quota (429) or unknown-model (404) errors.
-DEFAULT_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+# Tried in order; falls through on quota (429), overload (503) or retired-model (404) errors.
+# "-latest" aliases follow Google's current Flash models, so they survive model retirements.
+DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-3.1-flash-lite"]
 
 SYSTEM = """You are InsightAI, an experienced programme analyst supporting government
 public-health programme managers in India (district and state level).
@@ -48,9 +49,15 @@ class GeminiClient:
         config = types.GenerateContentConfig(
             system_instruction=SYSTEM + "\n" + LANG_NOTE.get(language, LANG_NOTE["English"]),
             temperature=temperature,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
         last_err: Exception | None = None
-        for model in self.models:
+        # Prefer the model that worked last time, then the configured list, then live discovery.
+        tried: set[str] = set()
+        for model in self._candidates():
+            if model in tried:
+                continue
+            tried.add(model)
             for attempt in range(2):
                 try:
                     resp = self.client.models.generate_content(model=model, contents=prompt, config=config)
@@ -68,11 +75,32 @@ class GeminiClient:
                     raise AIError(_friendly(e)) from e
         raise AIError(_friendly(last_err))
 
+    def _candidates(self):
+        if self.last_model:
+            yield self.last_model
+        yield from self.models
+        yield from self._discover()
+
+    def _discover(self) -> list[str]:
+        """Ask the API which Flash text models this key can use (fallback when all defaults fail)."""
+        try:
+            names = [m.name.removeprefix("models/") for m in self.client.models.list()
+                     if "generateContent" in (getattr(m, "supported_actions", None) or [])]
+        except Exception:  # noqa: BLE001
+            return []
+        skip = ("tts", "image", "preview", "transcribe", "robotics", "computer-use", "omni")
+        flash = [n for n in names if n.startswith("gemini") and "flash" in n and not any(s in n for s in skip)]
+        return sorted(flash, reverse=True)  # newest version first
+
 
 def _friendly(e: Exception | None) -> str:
     code = getattr(e, "code", None)
     if code == 429:
         return "Free-tier rate limit reached on all Gemini models. Wait a minute and try again."
+    if code == 503:
+        return "Gemini models are busy right now (high demand). Please try again in a minute."
+    if code == 404:
+        return "No Gemini model available for this API key. Set GEMINI_MODEL in secrets to a model listed in AI Studio."
     if code in (400, 401, 403):
         return f"Gemini rejected the request ({code}). Check that GEMINI_API_KEY is valid."
     return f"AI service error: {e}"

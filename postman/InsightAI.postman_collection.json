@@ -1,0 +1,88 @@
+{
+  "info": {
+    "name": "InsightAI — API Tests",
+    "description": "Tests the external APIs InsightAI depends on, before/after wiring them into the UI (IIT Patna Capstone best practice).\n\nSet collection variables: gemini_api_key (from aistudio.google.com/apikey), make_webhook_url (Make.com Custom webhook address), test_email.\nNever commit real keys — Postman stores variable values locally.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "gemini_api_key", "value": "" },
+    { "key": "gemini_model", "value": "gemini-3.5-flash" },
+    { "key": "make_webhook_url", "value": "" },
+    { "key": "test_email", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Gemini — List available models",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "x-goog-api-key", "value": "{{gemini_api_key}}" }],
+        "url": {
+          "raw": "https://generativelanguage.googleapis.com/v1beta/models",
+          "protocol": "https",
+          "host": ["generativelanguage", "googleapis", "com"],
+          "path": ["v1beta", "models"]
+        }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('Status 200', () => pm.response.to.have.status(200));",
+          "pm.test('Configured model is available', () => {",
+          "  const names = pm.response.json().models.map(m => m.name);",
+          "  pm.expect(names).to.include('models/' + pm.collectionVariables.get('gemini_model'));",
+          "});"
+        ]}
+      }]
+    },
+    {
+      "name": "2. Gemini — Generate insight (programme data)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "x-goog-api-key", "value": "{{gemini_api_key}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"systemInstruction\": {\"parts\": [{\"text\": \"You are InsightAI, a programme analyst. Use only the figures given. Be concise.\"}]},\n  \"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"DATA: District,Schools Reported,Avg Boys / Session,Avg Girls / Session\\nMuzaffarpur,607,16.0,21.6\\nSheikhpura,202,14.9,19.0\\nAraria,12,36.4,25.4\\n\\nWhich district has the lowest girls share and what should be done?\"}]}],\n  \"generationConfig\": {\"temperature\": 0.3}\n}"
+        },
+        "url": {
+          "raw": "https://generativelanguage.googleapis.com/v1beta/models/{{gemini_model}}:generateContent",
+          "protocol": "https",
+          "host": ["generativelanguage", "googleapis", "com"],
+          "path": ["v1beta", "models", "{{gemini_model}}:generateContent"]
+        }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('Status 200', () => pm.response.to.have.status(200));",
+          "pm.test('Answer text returned', () => {",
+          "  const text = pm.response.json().candidates[0].content.parts[0].text;",
+          "  pm.expect(text.length).to.be.above(20);",
+          "  pm.expect(text).to.include('Araria');",
+          "});",
+          "pm.test('Response under 60 s', () => pm.expect(pm.response.responseTime).to.be.below(60000));"
+        ]}
+      }]
+    },
+    {
+      "name": "3. Make.com — Send test report to webhook",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"kind\": \"postman_test\",\n  \"recipient_email\": \"{{test_email}}\",\n  \"subject\": \"InsightAI — Postman test\",\n  \"body_markdown\": \"## Test\\n- Make.com webhook reachable\",\n  \"body_html\": \"<h3>Test</h3><ul><li>Make.com webhook reachable</li></ul>\",\n  \"source_file\": \"postman\",\n  \"model\": \"\",\n  \"generated_at\": \"{{$isoTimestamp}}\",\n  \"app\": \"InsightAI\",\n  \"has_attachment\": false,\n  \"docx_filename\": \"\",\n  \"docx_base64\": \"\",\n  \"language\": \"English\"\n}"
+        },
+        "url": { "raw": "{{make_webhook_url}}", "host": ["{{make_webhook_url}}"] }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('Webhook accepted (200/202)', () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));"
+        ]}
+      }]
+    }
+  ]
+}
