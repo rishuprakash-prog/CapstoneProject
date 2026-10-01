@@ -172,12 +172,19 @@ a steady improvement in Nalanda, and some schools with 2+ consecutive missing re
 - Users can delete their stored history at any time from the History page.
 - Every output shows its source dataset and the AI model used. AI interpretations are labelled for human verification.
 
-## Demo script (3–5 min)
-1. Problem: 30 seconds on data overload in monthly programme reviews.
-2. Load the sample SHWP data and show the auto-detected columns.
-3. Dashboard: KPI cards, district comparison, trend, completeness heatmap, missing schools.
-4. Click **Generate AI insights**.
-5. Ask InsightAI two questions, one in English and one in Hindi.
-6. Open **Priority Actions** to show the top 5 with owners and timelines.
-7. Open **Review Brief**, download the Word file, and open it.
-8. Close with the impact: from days of preparation to minutes, and how it scales to nutrition, education and other programmes.
+## Project documents
+
+| Document | What it covers |
+|---|---|
+| [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) | Full write-up for the Notion page: problem, solution, system flow, tools, design decisions, testing, **learnings**, future scope |
+| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Timed 4½-minute demo video script with voiceover |
+| [docs/LINKEDIN_POSTS.md](docs/LINKEDIN_POSTS.md) | Four #IITPatnaCapstone build-in-public post drafts |
+
+**Live app:** https://capstoneproject-n9k7dyiappt5htaaj2nppxl.streamlit.app/
+
+## Key learnings (short)
+1. Understand the data first. CRT rows are activities, not sessions; without de-duplication, totals are about 65% too high.
+2. Let pandas compute and let the LLM interpret. This gives accurate numbers and small prompts, and keeps the app inside the free tier.
+3. Expect models to be retired. Use model fallbacks plus live discovery.
+4. Integration details matter. Use a Make *webhook*, not a *mailhook*, and send real file uploads rather than base64 text.
+5. Scan the git history for secrets before making a repository public.
