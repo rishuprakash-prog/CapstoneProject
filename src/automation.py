@@ -103,8 +103,19 @@ def send_to_make(webhook_url: str, payload: dict, timeout: float = 30.0) -> tupl
     """POST the payload to a Make Custom Webhook. Returns (ok, user-facing message)."""
     if not webhook_url:
         return False, "Make.com webhook URL not configured (MAKE_WEBHOOK_URL)."
+    # With an attachment, send multipart/form-data so Make receives a real file
+    # (collection with name / mime / data) that maps straight into Gmail, no toBinary() needed.
+    fields = {k: str(v) for k, v in payload.items() if k != "docx_base64"}
+    files = None
+    if payload.get("docx_base64"):
+        files = {"attachment": (payload.get("docx_filename") or "InsightAI.docx",
+                                base64.b64decode(payload["docx_base64"]),
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
     try:
-        resp = httpx.post(webhook_url, json=payload, timeout=timeout)
+        if files:
+            resp = httpx.post(webhook_url, data=fields, files=files, timeout=timeout)
+        else:
+            resp = httpx.post(webhook_url, json=payload, timeout=timeout)
     except httpx.TimeoutException:
         return False, "Make.com did not respond in time. Check that the scenario is ON and try again."
     except httpx.HTTPError as e:

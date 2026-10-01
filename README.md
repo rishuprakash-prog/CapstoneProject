@@ -127,27 +127,27 @@ copy .streamlit\secrets.toml.example .streamlit\secrets.toml   # then paste your
 ## Automation with Make.com (free)
 
 The AI summary, Priority Actions and Review Brief pages each have an **📧 Email via Make.com** panel.
-It sends the output as JSON to a Make **Custom Webhook**. Make then emails it through Gmail, attaching
-the Word brief, and can also save it to Google Drive.
+It sends the output to a Make **Custom Webhook**, and Make emails it through Gmail with a Word file
+attached. Every send includes a Word file. The request is `multipart/form-data`: the text fields are
+form fields, and the Word document is a real file field called `attachment`. Because Make receives a
+real file, it can pass it straight to Gmail, with no `toBinary()` conversion.
 
-**Set up the scenario:**
+**Set up the scenario (tested end to end):**
 1. Sign up at https://www.make.com (free plan) and click **Create a new scenario**.
-2. Add **Webhooks → Custom webhook**, click **Add**, name it `InsightAI`, and copy the webhook address.
-3. Paste the address into `.streamlit/secrets.toml` as `MAKE_WEBHOOK_URL = "..."`, then restart the app.
-4. In Make, click **Redetermine data structure**. In the app, send one email from Review Brief, so Make learns the fields.
-5. Add **Gmail → Send an email** and connect your Google account:
-   - **To:** `{{recipient_email}}`
-   - **Subject:** `{{subject}}`
-   - **Content:** `{{body_html}}`
-   - **Attachments:** File name `{{docx_filename}}`, Data `{{toBinary(docx_base64; "base64")}}`
-   - Set a filter on this route, `has_attachment = true`. Add a second Gmail route without the attachment for `has_attachment = false`.
+2. Add **Webhooks → Custom webhook**. Choose *Custom webhook*, not *Custom mailhook*. Click **Add**, name it `InsightAI`, and leave API keys empty.
+3. Copy the `https://hook.<region>.make.com/...` URL into `.streamlit/secrets.toml` as `MAKE_WEBHOOK_URL`, then restart the app.
+4. On the webhook module, click **Detect new values** (shown as *Redetermine data structure* in older UI). While it is listening, send one email from the app, so Make learns the fields, including `attachment`.
+5. Add **Gmail → Send an email** and connect your Google account. Map the fields:
+   - **To:** `recipient_email`
+   - **Subject:** `subject`
+   - **Body type:** Raw HTML. **Content:** `body_html`
+   - **Attachments → Add attachment:** File name `docx_filename`, Data `attachment → data`
 6. Optional: add **Google Drive → Upload a file**, using the same file name and data, to keep an archive.
-7. Optional: add **Webhooks → Webhook response**, status `200`.
-8. Turn the scenario **ON** and save it.
+7. Save the scenario and turn **Immediately as data arrives** ON.
 
-**Payload fields:** `kind` (review_brief, priority_actions, ai_summary), `recipient_email`, `subject`,
-`body_markdown`, `body_html`, `has_attachment`, `docx_filename`, `docx_base64`, `source_file`, `model`,
-`generated_at`, `language`.
+**Fields sent:** `kind` (review_brief, priority_actions, ai_summary), `recipient_email`, `subject`,
+`body_markdown`, `body_html`, `has_attachment`, `docx_filename`, `source_file`, `model`,
+`generated_at`, `language`, plus the file field `attachment`.
 
 ## API testing with Postman (free)
 

@@ -185,6 +185,9 @@ def make_panel(kind: str, subject: str, body_md: str, docx: bytes | None = None,
             if not automation.valid_email(to):
                 st.error("Please enter a valid email address.")
                 return
+            if docx is None:  # always attach a Word file so one Make route handles every kind
+                docx = markdown_to_docx(body_md, None, ss.file_name)
+                docx_filename = f"InsightAI_{kind}.docx"
             payload = automation.build_payload(
                 kind, to, subject, body_md, ss.file_name, getattr(ss.get("_ai"), "last_model", None),
                 docx, docx_filename, {"language": ss.get("language", "English")})
